@@ -1,0 +1,268 @@
+---
+title: "Weather Analysis"
+author: "Lisa Li"
+date: "6/7/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loading sale & store data}
+# 416
+ll_sales <- read.csv("C:path/sale_by_order_date.csv")
+ll_store_list <- read.csv("C:path/store_list.csv")
+```
+
+```{r fix the colname}
+library(tidyr)
+library(dplyr)
+
+colnames(ll_sales) <- c("sales_index", "order_date", "sold_to_pt", "soff", "item", "article_name", "mdse_cat", "su",  "profit_ctr", "curr", "quantity", "cost", "in_effect", "after_markdown", "after_discount", "final_sales")
+```
+
+```{r 2019 daily & weekly sales trends}
+library(dplyr)
+library(reshape2)
+library(lubridate)
+ll_sales$order_date_fix <- format(as.POSIXct(ll_sales$order_date,format='%m/%d/%Y %H:%M:%S'),format='%Y-%m-%d',tz = "UTC")
+ll_sales$final_sales_fix <- gsub("[//$,(,)]", "", ll_sales$final_sales)
+ll_sales$final_sales_fix <- as.numeric(as.character(ll_sales$final_sales_fix))
+
+curr_type <- ll_sales %>% 
+  select(final_sales_fix, curr) %>% 
+  group_by(curr) %>% 
+  summarise(sale = sum(final_sales_fix))
+
+sale_day <- ll_sales %>% 
+  mutate(year = year(order_date_fix)) %>% 
+  filter(year %in% c("2018","2019")) %>% 
+  select(order_date_fix, curr, final_sales, final_sales_fix) %>% 
+  mutate(sales_fix = ifelse(curr %in% "CAD", 0.75*final_sales_fix, final_sales_fix)) %>% 
+  group_by(order_date_fix, curr) %>% 
+  summarise(sale = sum(sales_fix)) %>% 
+  dcast(order_date_fix ~ curr)
+
+sales_week <- ll_sales %>% 
+  mutate(order_yr = year(order_date_fix),
+         order_wk = week(order_date_fix),
+         sales_fix = ifelse(curr %in% "CAD", 0.75*final_sales_fix, final_sales_fix)) %>% 
+  filter(order_yr %in% c("2018","2019"),
+         curr %in% "USD") %>% 
+  group_by(soff, order_yr, order_wk, curr) %>% 
+  summarise(final_sales = sum(sales_fix)) 
+```
+
+```{r systemwide analysis}
+total_num <- ll_sales %>% 
+  mutate(order_year = year(order_date_fix),
+         sales_fix = ifelse(curr %in% "CAD", 0.75*final_sales_fix, final_sales_fix)) %>% 
+  group_by(order_year,curr) %>% 
+  summarise(total_stores = n_distinct(soff), 
+            total_sales = sum(sales_fix),
+            total_quantity = sum(quantity),
+            avg_sale_per_quantity = total_sales/total_quantity) 
+
+ll_sales$soff <- as.character(ll_sales$soff)
+ll_store_list$store.number <- as.character(ll_store_list$store.number)
+
+store_sale <- ll_sales %>% 
+  mutate(order_year = year(order_date_fix),
+         sales_fix = ifelse(curr %in% "CAD", 0.75*final_sales_fix, final_sales_fix)) %>% 
+  left_join(ll_store_list, by = c("soff" = "store.number")) %>% 
+  group_by(order_year, curr, soff) %>% 
+  summarise(total_sales = sum(sales_fix),
+            total_quantity = sum(quantity),
+            avg_sale_per_quantity = round(total_sales/total_quantity,2)) 
+```
+
+```{r weather data}
+w_data_18 <- read.csv("C:path/weather/gcp_gsod_2018.csv")
+w_data_19 <- read.csv("C:path/weather/gcp_gsod_2019.csv")
+w_station <- read.csv("C:path/weather/gcp_gsod_station.csv")
+tbl_vars(w_data_18)
+tbl_vars(w_station)
+```
+
+```{r find the stations within 20 miles for all stores}
+library(geosphere)
+library(zipcode)
+library(RCurl)
+library(RJSONIO)
+
+ll_store_list_filter <- ll_store_list[,c(2,3,7,43,44)]
+tbl_vars(ll_store_list_filter)
+
+b <- 20 # miles in radius
+
+storelist <- data.frame()
+
+target <- ll_store_list_filter[,c("store.number", "lon", "lat" )]
+
+target <- target[complete.cases(target),]
+
+  
+for (i in 1: length(target$store.number))
+{
+  a <- as.character(target[i,1])
+  
+  ab <- target[ i ,c("lon", "lat")]
+  
+  ab2 <- w_station[,c("lon", "lat")]
+  
+  test <- as.data.frame(distm(ab, ab2))
+  
+  test1 <- as.data.frame(t(test))
+  
+  test2 <- cbind(w_station[,c(1:5,7:8)],test1)
+  
+  colnames(test2) <- c("usaf", "wban", "name", "country", "state", "elev","end","meter")
+  
+  test2 <- mutate(test2, kilometer = meter/1000, miles = kilometer * 0.621371)
+  
+  store1 <- filter(test2, miles <= b)
+  
+  store1 <- mutate(store1, store.number = a)
+    
+  storelist <- rbind(store1, storelist)
+    
+  storelist <- filter(storelist, store.number !="")
+
+}
+
+station.list <- storelist %>% 
+  filter(!wban %in% "99999") %>% 
+  group_by(wban) %>% 
+  summarise(n = n())
+
+# 404
+total.stores <- storelist %>% 
+  summarise(n = n_distinct(store.number))
+
+s.list <- as.list(station.list$wban)
+```
+
+```{r weather data preparation}
+w_data <- rbind(w_data_18, w_data_19)
+rm(w_data_18)
+rm(w_data_19)
+tbl_vars(w_data)
+w_data_filter <- w_data %>% 
+  filter(wban %in% s.list) 
+
+storelist$wban <- as.character(storelist$wban)
+w_data_filter$wban <- as.character(w_data_filter$wban)
+
+w_data_filter <- w_data_filter %>% 
+  mutate(temp_fix = ifelse(temp %in% '9999.9', mean(temp[temp != 9999.9]), temp),
+         dewp_fix = ifelse(dewp %in% '9999.9', mean(dewp[dewp != 9999.9]), dewp),
+         slp_fix = ifelse(slp %in% '9999.9', mean(slp[slp != 9999.9]), slp),
+         visib_fix = ifelse(visib %in% '999.9', mean(visib[visib != 999.9]), visib),
+         wdsp_fix = ifelse(wdsp %in% '999.9', mean(wdsp[wdsp != 999.9]), wdsp),
+         sndp_fix = ifelse(sndp %in% '999.9', mean(sndp[sndp != 999.9]), sndp),
+         gust_fix = ifelse(gust %in% '999.9', mean(gust[gust != 999.9]), gust),
+         prcp_fix = ifelse(prcp %in% '99.99', mean(prcp[prcp != 99.99]), prcp),
+         max_fix = ifelse(max %in% '9999.9', mean(max[max != 9999.9]), max),
+         mxpsd_fix = ifelse(mxpsd %in% '999.9', mean(mxpsd[mxpsd != 999.9]), mxpsd))
+
+w_data_total <- w_data_filter %>% 
+  full_join(storelist, by = "wban") %>% 
+  group_by(store.number, year, mo, da) %>% 
+  summarise(t.stations = n_distinct(wban),
+            avg.temp = mean(temp_fix),
+            avg.dewp = mean(dewp_fix),
+            avg.slp = mean(slp_fix),
+            avg.visib = mean(visib_fix),
+            avg.wdsp = mean(wdsp_fix),
+            avg.sndp = mean(sndp_fix),
+            avg.gust = mean(gust_fix),
+            avg.prcp = mean(prcp_fix),
+            max.wdsp = mean(mxpsd_fix),
+            max.temp = mean(max_fix),
+            str.fog = sum(fog),
+            str.hail = sum(hail),
+            str.thunder = sum(thunder),
+            str.tornado_funnel_cloud = sum(tornado_funnel_cloud)) 
+w_data_total$key <- paste(w_data_total$store.number, w_data_total$year, w_data_total$mo, w_data_total$da)
+
+mth_sale <- ll_sales %>% 
+  mutate(yr = year(order_date_fix),
+         mth = month(order_date_fix),
+         day = day(order_date_fix)) %>% 
+  group_by(soff, yr, mth, day) %>% 
+  summarise(final_sale = sum(final_sales_fix))
+  
+mth_sale$key <- paste(mth_sale$soff, mth_sale$yr, mth_sale$mth, mth_sale$day)
+
+sale_weather <- mth_sale %>% 
+  inner_join(w_data_total, by = "key")
+
+sale_weather$store.number <- NULL
+```
+
+```{r weather trend with sale}
+w_data_trend <- w_data_filter %>% 
+  full_join(storelist, by = "wban") %>% 
+  group_by(year, mo, da) %>% 
+  summarise(t.stations = n_distinct(wban),
+            avg.temp = mean(temp_fix),
+            avg.dewp = mean(dewp_fix),
+            avg.slp = mean(slp_fix),
+            avg.visib = mean(visib_fix),
+            avg.wdsp = mean(wdsp_fix),
+            avg.sndp = mean(sndp_fix),
+            avg.gust = mean(gust_fix),
+            avg.prcp = mean(prcp_fix),
+            max.wdsp = mean(mxpsd_fix),
+            max.temp = mean(max_fix),
+            str.fog = sum(fog),
+            str.hail = sum(hail),
+            str.thunder = sum(thunder),
+            str.tornado_funnel_cloud = sum(tornado_funnel_cloud)) 
+w_data_trend$key <- paste(w_data_trend$year, w_data_trend$mo, w_data_trend$da)
+
+mth_sale_trend <- ll_sales %>% 
+  mutate(yr = year(order_date_fix),
+         mth = month(order_date_fix),
+         day = day(order_date_fix)) %>% 
+  group_by(yr, mth, day) %>% 
+  summarise(final_sale = sum(final_sales_fix))
+  
+mth_sale_trend$key <- paste(mth_sale_trend$yr, mth_sale_trend$mth, mth_sale_trend$day)
+
+sale_weather_trend <- mth_sale_trend %>% 
+  inner_join(w_data_trend, by = "key")
+
+tbl_vars(sale_weather_trend)
+```
+
+```{r weather analysis by region}
+tbl_vars(ll_store_list)
+region <- ll_store_list[,c(2,5,13,14)]
+region_weather <- region %>% 
+  full_join(sale_weather, by = c("store.number" = "soff"))
+```
+
+```{r correlation analysis}
+tbl_vars(sale_weather)
+tbl_vars(sale_weather_trend)
+
+library(corrplot)
+plot_corr <- cor(sale_weather[,c(5,10:22)])
+corrplot(plot_corr, type="upper", order="hclust")
+
+model_store_day <- lm(sale_weather$final_sale ~ ., data =  sale_weather[,c(5,10,11,13:18,20,21)])
+model_trend_day <- lm(sale_weather_trend$final_sale ~ ., data =  sale_weather_trend[,c(4,9:21)])
+
+summary(model_store_day)
+summary(model_trend_day)
+```
+
+```{r data exporting}
+write.csv(region_weather,"C:path/outputs/sale_weather_region_store.csv")
+write.csv(sale_weather_trend,"C:path/outputs/sale_weather_trend.csv")
+write.csv(plot_corr,"C:path/outputs/sale_weather_corr.csv")
+```
+
